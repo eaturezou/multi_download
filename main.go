@@ -13,23 +13,24 @@ package main
 import (
 	"crypto/md5"
 	"fmt"
-	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 )
 
-const tmpFileName = "tmp."
+const tmpFileName = "./tmp/tmp"
 
 var (
-	canMultiDownload = false
-	maxGoruntineNum = 100
-	maxLengthPerGoruntine int64 = 10000000
-	waitGroup = sync.WaitGroup{}
-	tmpFile = make(map[string][]string)
-	urlMd5String string
+	canMultiDownload            = false
+	maxGoruntineNum             = 1000
+	maxLengthPerGoruntine int64 = 1000000
+	waitGroup                   = sync.WaitGroup{}
+	tmpFile                     = make(map[string][]string)
+	urlMd5String          string
 )
 
 func main() {
@@ -55,22 +56,23 @@ func main() {
 	if response, err := client.Do(request); err == nil {
 		contentLength := response.ContentLength
 		acceptRange := response.Header.Get("Accept-Ranges")
+		response.Body.Close()
 		if acceptRange == "bytes" {
 			canMultiDownload = true
 		}
 		if canMultiDownload == false {
 			goruntine = 1
 			perContent = contentLength
-		} else  {
+		} else {
 			if contentLength <= maxLengthPerGoruntine {
 				goruntine = maxGoruntineNum
-				perContent = contentLength / int64(goruntine) + 1
+				perContent = contentLength/int64(goruntine) + 1
 			} else {
 				perContent = maxLengthPerGoruntine
 				hadMod := contentLength % maxLengthPerGoruntine
 				goruntine = int(contentLength / maxLengthPerGoruntine)
 				if hadMod != 0 {
-					goruntine ++
+					goruntine++
 				}
 			}
 		}
@@ -78,35 +80,54 @@ func main() {
 	if goruntine > maxGoruntineNum {
 		leftGoruntine := goruntine
 		downloadGoruntine := maxGoruntineNum
-		j := 0;
-		download:
-			for i := 0 ; i < downloadGoruntine ; i ++ {
-				waitGroup.Add(1)
-				startBytes := int64(j) * perContent
-				endBytes := int64(j + 1) * perContent
-				tmpFile[urlMd5String] = append(tmpFile[urlMd5String], tmpFileName + string(startBytes) + "-" + string(endBytes))
-				go sliceDownload(startBytes, endBytes, url, j)
-				j ++
+		j := 0
+	download:
+		for i := 0; i < downloadGoruntine; i++ {
+			waitGroup.Add(1)
+			startBytes := int64(j) * perContent
+			endBytes := int64(j+1) * perContent
+			tmpFile[urlMd5String] = append(tmpFile[urlMd5String], tmpFileName+strconv.FormatInt(startBytes, 10)+"-"+strconv.FormatInt(endBytes, 10))
+			go sliceDownload(startBytes, endBytes, url, j)
+			j++
+		}
+		waitGroup.Wait()
+		leftGoruntine -= downloadGoruntine
+		if leftGoruntine > 0 {
+			if leftGoruntine >= maxGoruntineNum {
+				downloadGoruntine = maxGoruntineNum
+			} else {
+				downloadGoruntine = leftGoruntine
 			}
-			waitGroup.Wait()
-			leftGoruntine -= downloadGoruntine
-			if leftGoruntine > 0 {
-				if leftGoruntine >= maxGoruntineNum {
-					downloadGoruntine = maxGoruntineNum
-				} else {
-					downloadGoruntine = leftGoruntine
-				}
-				goto download
-			}
+			goto download
+		}
 	} else {
 		for i := 0; i < goruntine; i++ {
 			waitGroup.Add(1)
 			startBytes := int64(i) * perContent
-			endBytes := int64(i + 1) * perContent
-			tmpFile[urlMd5String] = append(tmpFile[urlMd5String], tmpFileName + string(startBytes) + "-" + string(endBytes))
+			endBytes := int64(i+1) * perContent
+			tmpFile[urlMd5String] = append(tmpFile[urlMd5String], tmpFileName+strconv.FormatInt(startBytes, 10)+"-"+strconv.FormatInt(endBytes, 10))
 			go sliceDownload(startBytes, endBytes, url, i)
 		}
 		waitGroup.Wait()
+	}
+	arr := strings.Split(url, "/")
+	requestFile := arr[len(arr)-1]
+	finalFile, err := os.Create("./" + requestFile)
+	if err != nil {
+		log.Fatalln("Create File " + requestFile + "Error :" + err.Error())
+	}
+	for _, fileName := range tmpFile[urlMd5String] {
+		file, _ := os.OpenFile(fileName, os.O_RDONLY, 0600)
+		content, err := ioutil.ReadAll(file)
+		if err != nil {
+			log.Fatalln("Read from " + fileName + "Error: " + err.Error())
+		}
+		n, _ := finalFile.Seek(0, os.SEEK_END)
+		_, err = finalFile.WriteAt(content, n)
+		if err != nil {
+			log.Fatalln("Write file Error: " + err.Error())
+		}
+
 	}
 }
 
@@ -121,31 +142,30 @@ func sliceDownload(startBytes, endBytes int64, url string, index int) {
 		log.Fatalln("init request error : " + err.Error())
 		return
 	}
-
 	contentRange := strconv.FormatInt(startBytes, 10) + "-" + strconv.FormatInt(endBytes, 10)
-	request.Header.Add("Range", "bytes=" + contentRange)
+	request.Header.Add("Range", "bytes="+contentRange)
 	response, err := client.Do(request)
-	if err != nil {
+	defer response.Body.Close()
+	if err != nil || response == nil {
 		log.Fatalln("Download error : " + err.Error())
 		return
 	}
-	httpStatus := response.StatusCode
-	if httpStatus != http.StatusOK {
-		log.Fatalln("download error : " + err.Error())
-		return
-	}
+	//httpStatus := response.StatusCode
+	log.Println("download status: " + response.Status)
 	tmpFileName := tmpFile[urlMd5String][index]
-	tmpFile, err := os.Create(tmpFileName)
+	tmpFile, err := os.OpenFile(tmpFileName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0777)
+	defer tmpFile.Close()
 	if err != nil {
 		log.Fatalln("open file error : " + err.Error())
 		return
 	}
-	size, err := io.Copy(tmpFile, response.Body)
+	content, _ := ioutil.ReadAll(response.Body)
+	size, err := tmpFile.Write(content)
 	if err != nil {
 		log.Fatalln("copy file to tmp file error :" + err.Error())
 		return
 	}
-	if size <= 0{
+	if size <= 0 {
 		log.Fatalln("download error")
 		return
 	}
