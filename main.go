@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const tmpFileName = "./tmp/tmp"
@@ -34,6 +35,7 @@ var (
 )
 
 func main() {
+	startTime := time.Now().Unix()
 	argv := os.Args
 	if len(argv) < 2 {
 		log.Fatalln("no url found")
@@ -116,18 +118,44 @@ func main() {
 	if err != nil {
 		log.Fatalln("Create File " + requestFile + "Error :" + err.Error())
 	}
+	var i int64 = 0
 	for _, fileName := range tmpFile[urlMd5String] {
 		file, _ := os.OpenFile(fileName, os.O_RDONLY, 0600)
-		content, err := ioutil.ReadAll(file)
+		//content, err := ioutil.ReadAll(file)
+		//if err != nil {
+		//	log.Fatalln("Read from " + fileName + "Error: " + err.Error())
+		//}
+		//n, _ := finalFile.Seek(0, os.SEEK_END)
+		//_, err = finalFile.WriteAt(content, n
+		stat, err := file.Stat()
 		if err != nil {
-			log.Fatalln("Read from " + fileName + "Error: " + err.Error())
+			panic(err)
 		}
-		n, _ := finalFile.Seek(0, os.SEEK_END)
-		_, err = finalFile.WriteAt(content, n)
+		num := stat.Size()
+		buf := make([]byte, maxLengthPerGoruntine)
+		for j := 0; int64(j) < num; {
+			length, err := file.Read(buf)
+			if err != nil {
+				fmt.Println("读取文件错误")
+			}
+			size, err := finalFile.WriteAt(buf[:length], int64(i))
+			if size <= 0 {
+				log.Println("write error")
+			}
+			i += int64(length)
+			j += length
+			if err != nil {
+				log.Fatalln("Write file Error: " + err.Error())
+			}
+		}
+	}
+	endTime := time.Now().Unix()
+	log.Println("Download complete in " + strconv.FormatInt(endTime-startTime, 10) + "s")
+	for _, mvFile := range tmpFile[urlMd5String] {
+		err = os.Remove(mvFile)
 		if err != nil {
-			log.Fatalln("Write file Error: " + err.Error())
+			log.Println("Remove tmp file error " + err.Error())
 		}
-
 	}
 }
 
@@ -142,7 +170,7 @@ func sliceDownload(startBytes, endBytes int64, url string, index int) {
 		log.Fatalln("init request error : " + err.Error())
 		return
 	}
-	contentRange := strconv.FormatInt(startBytes, 10) + "-" + strconv.FormatInt(endBytes, 10)
+	contentRange := strconv.FormatInt(startBytes, 10) + "-" + strconv.FormatInt(endBytes-1, 10)
 	request.Header.Add("Range", "bytes="+contentRange)
 	response, err := client.Do(request)
 	defer response.Body.Close()
@@ -151,7 +179,7 @@ func sliceDownload(startBytes, endBytes int64, url string, index int) {
 		return
 	}
 	//httpStatus := response.StatusCode
-	log.Println("download status: " + response.Status)
+	//log.Println("download status: " + response.Status)
 	tmpFileName := tmpFile[urlMd5String][index]
 	tmpFile, err := os.OpenFile(tmpFileName, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0777)
 	defer tmpFile.Close()
